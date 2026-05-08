@@ -7,6 +7,43 @@ import { generateToken, authenticateToken } from '../middleware/auth.js';
 const router = express.Router();
 const db = getConnection();
 
+// [COBOT] Login throttle — IP 단위 brute-force 방어
+const LOGIN_ATTEMPTS = new Map();
+const THROTTLE_MAX = 5;
+const THROTTLE_WINDOW_MS = 10 * 60 * 1000;
+const THROTTLE_BLOCK_MS = 60 * 60 * 1000;
+function _clientIp(req) {
+  return (req.headers['cf-connecting-ip']
+    || (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+    || req.ip
+    || req.connection?.remoteAddress
+    || 'unknown').toString();
+}
+function loginThrottleCheck(req, res, next) {
+  const ip = _clientIp(req);
+  const now = Date.now();
+  const e = LOGIN_ATTEMPTS.get(ip);
+  if (e && e.blockUntil && e.blockUntil > now) {
+    const remainSec = Math.ceil((e.blockUntil - now) / 1000);
+    return res.status(429).json({ error: `Too many failed login attempts. Try again in ${remainSec}s.` });
+  }
+  next();
+}
+function _recordFail(ip) {
+  const now = Date.now();
+  let e = LOGIN_ATTEMPTS.get(ip);
+  if (!e || (now - e.firstAt) > THROTTLE_WINDOW_MS) {
+    e = { count: 0, firstAt: now };
+  }
+  e.count += 1;
+  if (e.count >= THROTTLE_MAX) {
+    e.blockUntil = now + THROTTLE_BLOCK_MS;
+  }
+  LOGIN_ATTEMPTS.set(ip, e);
+  return e;
+}
+function _recordSuccess(ip) { LOGIN_ATTEMPTS.delete(ip); }
+
 // Check auth status and setup requirements
 router.get('/status', async (req, res) => {
   try {
@@ -23,6 +60,9 @@ router.get('/status', async (req, res) => {
 
 // User registration (setup) - only allowed if no users exist
 router.post('/register', async (req, res) => {
+  // [PATCHED] Disabled: admin already registered.
+  return res.status(403).json({ error: 'Registration disabled' });
+
   try {
     const { username, password } = req.body;
     
@@ -80,40 +120,38 @@ router.post('/register', async (req, res) => {
   }
 });
 
-// User login
-router.post('/login', async (req, res) => {
+// User login (throttled)
+router.post('/login', loginThrottleCheck, async (req, res) => {
+  const ip = _clientIp(req);
   try {
     const { username, password } = req.body;
-    
-    // Validate input
+
     if (!username || !password) {
       return res.status(400).json({ error: 'Username and password are required' });
     }
-    
-    // Get user from database
+
     const user = userDb.getUserByUsername(username);
     if (!user) {
+      _recordFail(ip);
       return res.status(401).json({ error: 'Invalid username or password' });
     }
-    
-    // Verify password
+
     const isValidPassword = await bcrypt.compare(password, user.password_hash);
     if (!isValidPassword) {
+      _recordFail(ip);
       return res.status(401).json({ error: 'Invalid username or password' });
     }
-    
-    // Generate token
+
+    _recordSuccess(ip);
     const token = generateToken(user);
-    
-    // Update last login
     userDb.updateLastLogin(user.id);
-    
+
     res.json({
       success: true,
       user: { id: user.id, username: user.username },
       token
     });
-    
+
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Internal server error' });
