@@ -142,3 +142,8 @@ tasks/
 
 # Git worktrees
 .worktrees/
+
+# Cobot debugging/operations artifacts
+debug-screenshots/
+*.bak.*
+logs/
