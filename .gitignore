@@ -147,3 +147,4 @@ tasks/
 debug-screenshots/
 *.bak.*
 logs/
+.env.backup*
